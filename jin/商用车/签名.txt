@@ -1,0 +1,304 @@
+var VUE_APP_KEY=pm.variables.get('TSP_KEY')
+var VUE_APP_SECRET=pm.variables.get('TSP_SECRET')
+var VUE_APP_ENV=pm.variables.get('APP_ENV')
+var host=pm.variables.get('host')
+var token=pm.variables.get('tsp_token')
+const uuid = require('uuid')
+const { parse } = require('url')
+const crypto = require('crypto-js')
+
+
+
+const querystring = require('querystring')
+const form = 'application/x-www-form-urlencoded'
+
+const hasOwnProperty = function (obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key)
+}
+const loweredKeys = (headers = {}) => {
+  var lowered = {}
+
+  var keys = Object.keys(headers)
+  for (let i = 0; i < keys.length; i++) {
+    let key = keys[i]
+    lowered[key.toLowerCase()] = headers[key]
+  }
+
+  return lowered
+}
+const md5 = content => {
+      return CryptoJS.MD5(content).toString(CryptoJS.enc.Base64)
+}
+const sign = stringToSign => {
+      console.log(stringToSign)
+      var sha256=CryptoJS.HmacSHA256("Message", "Secret Passphrase");
+      var hmac = CryptoJS.algo.HMAC.create(CryptoJS.algo.SHA256,VUE_APP_SECRET);
+       hmac.update(stringToSign);
+      var sha256 =  hmac.finalize()
+
+
+      return CryptoJS.enc.Base64.stringify(sha256);
+
+}
+const buildUrl = (parsedUrl, data) => {
+  var toStringify = Object.assign(parsedUrl.query, data)
+  var result = parsedUrl.pathname
+  if (Object.keys(toStringify).length) {
+    var keys = Object.keys(toStringify).sort()
+    var list = new Array(keys.length)
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i]
+      if (toStringify[key] !== undefined && toStringify[key] !== null && '' + toStringify[key]) {
+          if(typeof toStringify[key]=='object'){
+            list[i] = `${key}=${JSON.stringify(toStringify[key])}`
+          }else{
+            list[i] = `${key}=${toStringify[key]}`
+          }
+
+      } else {
+        list[i] = `${key}`
+      }
+    }
+    result += '?' + list.join('&')
+  }
+  return result
+}
+const buildStringToSign = (method, headers, signedHeadersStr, url, data) => {
+
+  // accept, contentMD5, contentType,
+  const lf = '\n'
+  var list = [method, lf]
+
+  var accept = headers['accept']
+  if (accept) {
+    list.push(accept)
+  }
+  list.push(lf)
+
+  var contentMD5 = headers['content-md5']
+  if (contentMD5) {
+    list.push(contentMD5)
+  }
+  list.push(lf)
+  var contentType = headers['Content-Type'] || ''
+  if (contentType) {
+    list.push(contentType)
+  }
+  list.push(lf)
+
+  var date = headers['date']
+  if (date) {
+    list.push(date)
+  }
+  list.push(lf)
+
+  if (signedHeadersStr) {
+    list.push(signedHeadersStr)
+    list.push(lf)
+  }
+
+
+
+  if (contentType.startsWith(form)) {
+    list.push(buildUrl(url, data))
+  } else {
+      if(data){
+            list.push(buildUrl(url,JSON.parse(data)))
+      }else{
+           list.push(buildUrl(url,data))
+      }
+
+  }
+  return list.join('')
+}
+const getSignHeaderKeys = (headers, signHeaders) => {
+  var keys = Object.keys(headers).sort()
+  var signKeys = []
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i]
+    // x-ca- 开头的header或者指定的header
+    if (key.startsWith('x-ca-') || hasOwnProperty(signHeaders, key)) {
+      signKeys.push(key)
+    }
+  }
+
+  // 按字典序排序
+  return signKeys.sort()
+}
+const buildHeaders = (headers = {}, signHeaders) => {
+  const stage =  VUE_APP_ENV.toUpperCase()
+  return Object.assign(
+    {
+      'x-ca-timestamp': Date.now(),
+      'x-ca-key':  VUE_APP_KEY,
+      'x-ca-nonce': uuid.v4(),
+      'x-ca-stage': stage === 'DEV' ? 'TEST' : stage,
+      accept: 'application/json'
+    },
+    headers,
+    signHeaders
+  )
+}
+const getSignedHeadersString = (signHeaders, headers) => {
+  var list = []
+  for (var i = 0; i < signHeaders.length; i++) {
+    var key = signHeaders[i]
+    if(key != 'Content-Type'){
+    list.push(key + ':' + headers[key])
+    }
+  }
+
+  return list.join('\n')
+}
+const requestHeaderInit = (method, url, opts = {}) => {
+  var parsed = parse(url, true)
+  console.log(parsed)
+  var query = opts.data
+  var headers = opts.headers || {}
+  var type = headers['Content-Type']
+  var originData = opts.data
+
+  switch (method) {
+    case 'GET':
+      if (query) {
+        // append data into querystring
+        Object.assign(parsed.query, query)
+        parsed.path = parsed.pathname + '?' + querystring.stringify(parsed.query)
+        opts.data = null
+        opts.query = null
+      }
+
+      // lowerify the header key
+      opts.headers = loweredKeys(opts.headers)
+      opts.signHeaders = loweredKeys(opts.signHeaders)
+      return { parsed, opts }
+    case 'POST':
+      // lowerify the header key
+      opts.headers = loweredKeys(opts.headers)
+      opts.signHeaders = loweredKeys(opts.signHeaders)
+
+      if (!type) {
+            headers['Content-Type'] = 'application/json'
+            type = headers['Content-Type']
+            opts.headers['Content-Type']='application/json'
+            opts.signHeaders['Content-Type']='application/json'
+
+      }
+
+      if (type.startsWith('application/x-www-form-urlencoded')) {
+        opts.data = querystring.stringify(opts.data)
+      } else if (type.startsWith('application/json')) {
+      //   opts.data = JSON.stringify(opts.data)
+      opts.data =opts.data
+      } else if (!Buffer.isBuffer(opts.data) && typeof opts.data !== 'string') {
+        // 非buffer和字符串时，以JSON.stringify()序列化
+        opts.data = JSON.stringify(opts.data)
+      }
+      return { parsed, opts, originData }
+    case 'PUT':
+      // if (query) {
+      //   // append data into querystring
+      //   Object.assign(parsed.query, query)
+      //   parsed.path = parsed.pathname + '?' + querystring.stringify(parsed.query)
+      //   opts.query = null
+      // }
+
+      // lowerify the header key
+      opts.headers = loweredKeys(opts.headers)
+      opts.signHeaders = loweredKeys(opts.signHeaders)
+
+      if (!type) {
+        headers['Content-Type'] = 'application/json'
+        type = headers['Content-Type']
+      }
+
+      if (type.startsWith('application/x-www-form-urlencoded')) {
+        opts.data = querystring.stringify(opts.data)
+      } else if (type.startsWith('application/json')) {
+      //   opts.data = JSON.stringify(opts.data)
+      } else if (!Buffer.isBuffer(opts.data) && typeof opts.data !== 'string') {
+        // 非buffer和字符串时，以JSON.stringify()序列化
+        opts.data = JSON.stringify(opts.data)
+      }
+      return { parsed, opts, originData }
+    case 'DELETE':
+      if (query) {
+        // append data into querystring
+        Object.assign(parsed.query, query)
+        parsed.path = parsed.pathname + '?' + querystring.stringify(parsed.query)
+        opts.data = null
+        opts.query = null
+      }
+      // lowerify the header key
+      opts.headers = loweredKeys(opts.headers)
+      opts.signHeaders = loweredKeys(opts.signHeaders)
+
+      return { parsed, opts }
+    default:
+      return {}
+  }
+}
+/*
+ * 函数：获取request header
+ * author: Mole
+ * 参数：title: 页面标题、option：其它配置
+ * 返回：无
+ */
+ function getRequestHeader(config) {
+//   console.log('config:', config)
+  const { method, url, data, headers: originHeader } = config
+
+  const { parsed, opts, originData } = requestHeaderInit(method, url, { data })
+
+  var signHeaders = opts.signHeaders
+  var headers = buildHeaders(originHeader, signHeaders)
+  var requestContentType = headers['Content-Type'] || ''
+  if (method === 'POST' && !requestContentType.startsWith(form)) {
+    headers['content-md5'] = md5(opts.data)
+  }
+
+  var signHeaderKeys = getSignHeaderKeys(headers, signHeaders)
+  headers['x-ca-signature-headers'] = signHeaderKeys.join(',')
+  var signedHeadersStr = getSignedHeadersString(signHeaderKeys, headers) 
+// console.log(signHeaderKeys)
+  var parsedUrl = parse(parsed, true)
+  var stringToSign = buildStringToSign(method, headers, signedHeadersStr, parsedUrl, originData)
+  headers['x-ca-signature'] = sign(stringToSign)
+
+  return headers
+}
+
+
+
+var method =pm.request.method
+var url =pm.request.url.getPath();
+
+var queryUrl=pm.request.url.getQueryString();
+if(host){
+url=host+url
+}
+if(queryUrl){
+    url=url+"?"+queryUrl;
+}
+
+
+var data =pm.variables.replaceIn(pm.request.body.raw)
+console.log(data); 
+var originHeader=pm.request.headers
+
+var headers ={originHeader:originHeader}
+var config = {method:method, url:url, data:data, headers:headers};
+var reqHeader= getRequestHeader(config)
+pm.request.headers.repopulate(reqHeader)
+pm.request.headers.upsert({
+      key:'x-ca-timestamp',
+      value: reqHeader['x-ca-timestamp']
+})
+
+if (token) {
+pm.request.headers.add(
+{
+	  key:"Authorization",
+	  value: "Bearer " + token
+})
+}
